@@ -2,6 +2,16 @@
 
 An interactive Bash manager that scans an IPv4 range for SSH services, identifies the remote OS, selects a configurable bootstrap provider, and runs the selected Ansible account bootstrap.
 
+## Bootstrap repositories
+
+This manager delegates the actual setup to these upstream repositories:
+
+- [Windows Ansible Bootstrap](https://github.com/Michdo93/ansible-windows-bootstrap)
+- [Kali Ansible Bootstrap](https://github.com/Michdo93/ansible-kali-bootstrap)
+- [Linux Ansible Bootstrap](https://github.com/Michdo93/ansible-linux-bootstrap)
+
+The Windows bootstrap is expected to leave its `upgrader.ps1` helper on the target as part of setup. See the Windows repository for the helper's location and usage details.
+
 ## Providers
 
 Provider mappings live in [`providers.sh`](providers.sh), separate from the manager logic. Each record contains an ID, a regular expression matched against `/etc/os-release` `ID` (or `windows`), execution type, and script URL.
@@ -14,11 +24,35 @@ The default mappings are:
 | Kali Linux (including Kali Purple, whose OS ID is Kali) | `kali` | `ansible-kali-bootstrap` `bootstrap-ansible-user.sh` |
 | Other Linux IDs | `linux` | `ansible-linux-bootstrap` `bootstrap-ansible-user.sh` |
 
-To add an OS, add a record to `BOOTSTRAP_PROVIDERS` in `providers.sh`. More specific matches must appear before broad matches such as `.*`. `shell` providers are run as Bash scripts with `username=... password=...` arguments. `powershell` providers are invoked with `-Username` and `-Password` parameters.
+### Add another bootstrap script
+
+The manager code does not need to change for a provider that uses one of the two supported interfaces. Add a record to the `BOOTSTRAP_PROVIDERS` array in `providers.sh` using this format:
+
+```text
+'provider-id|OS_ID_regex|execution_type|bootstrap_URL'
+```
+
+For example, to use a separate script for Fedora before the general Linux fallback:
+
+```bash
+  'fedora|fedora|shell|https://raw.githubusercontent.com/your-org/fedora-bootstrap/main/bootstrap.sh'
+```
+
+Place specific matches before broad matches such as `.*`; the manager selects the first matching record. The regular expression is matched against the `ID` value from Linux `/etc/os-release`. Windows uses the ID `windows`.
+
+Use `shell` for a POSIX/Bash bootstrap that accepts the same argument interface as the current Linux providers:
+
+```bash
+curl -fsSL "$url" | sudo bash -s -- username="$username" password="$password"
+```
+
+Use `powershell` for a Windows script that accepts `-Username` and `-Password`. The target's OpenSSH default shell must be PowerShell. The URL should point directly to the script entry point.
+
+If a new bootstrap needs different parameters, elevation behavior, package installation, or a different shell, update `bootstrap-manager.sh` to add a new execution type and implement its invocation. Also update this README with its prerequisites and security implications. Before adding a provider, confirm its OS detection ID and interface, check the script source, and try it on a disposable test host.
 
 ## Requirements
 
-- Bash 4 or newer, OpenSSH client, `timeout`, `sed`, and `base64` is not required.
+- Bash 4 or newer, OpenSSH client, `timeout`, and `sed`.
 - Linux or WSL as the machine running this manager. SSH targets must listen on TCP port 22.
 - Linux targets need a POSIX shell and an account that can use `sudo` (or root).
 - Windows targets need OpenSSH Server configured with PowerShell as its default shell. The SSH account must have the rights required by the Windows bootstrap.
