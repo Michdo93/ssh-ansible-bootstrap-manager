@@ -1,88 +1,63 @@
 # SSH Ansible Bootstrap Manager
 
-An interactive Bash manager that scans an IPv4 range for SSH services, identifies the remote OS, selects a configurable bootstrap provider, and runs the selected Ansible account bootstrap.
+Prepares hosts for Ansible from the **control node**: it logs in once with an existing administrator account, detects the operating system, uploads the matching bootstrap script and runs it as root/Administrator. The bootstrap creates a dedicated Ansible account (name of your choice), sets its password, installs the control node's SSH public key and configures privilege escalation.
 
-## Bootstrap repositories
+It is used automatically by [ansible-inventory-generator](https://github.com/Michdo93/ansible-inventory-generator) (recommended: that tool also writes the inventory and the Ansible Vault). It can also be run on its own.
 
-This manager delegates the actual setup to these upstream repositories:
+## What it does
 
-- [Windows Ansible Bootstrap](https://github.com/Michdo93/ansible-windows-bootstrap)
-- [Kali Ansible Bootstrap](https://github.com/Michdo93/ansible-kali-bootstrap)
-- [Linux Ansible Bootstrap](https://github.com/Michdo93/ansible-linux-bootstrap)
-
-The Windows bootstrap is expected to leave its `upgrader.ps1` helper on the target as part of setup. See the Windows repository for the helper's location and usage details.
+1. **SSH key pair**: uses `~/.ssh/id_ed25519`, `id_ecdsa` or `id_rsa`; generates an ed25519 key if none exists (`--key` / `BM_KEY_FILE` to choose another). A missing `.pub` is derived from the private key.
+2. **Host keys**: the first contact is accepted automatically (`StrictHostKeyChecking=accept-new`, i.e. "yes" to the fingerprint question). A changed host key (e.g. after reinstalling a VM) is never accepted silently; in interactive runs you are asked whether to remove the stale `known_hosts` entry.
+3. **Admin login**: password (via `sshpass`, or `SSH_ASKPASS` with OpenSSH ≥ 8.4) or SSH key/agent. Works for `root`, for sudo users with or without password, and for Windows administrators (cmd or PowerShell as default shell).
+4. **Provider**: selected from `providers.sh` by the OS ID and **uploaded from the control node** - targets need no `curl` and do not fetch code from the Internet. A checkout of the provider repository next to this one (or in `./vendor`, or `$BOOTSTRAP_PROVIDER_DIR`) is preferred over the URL.
+5. **Secrets**: the account password (and a sudo password, if needed) is sent through the SSH channel's stdin (Linux) or a temporary file in the administrator's profile that is deleted immediately (Windows). It never appears in a process list or on the screen.
+6. **Verification**: key-based login as the new account must work at the end.
 
 ## Providers
 
-Provider mappings live in [`providers.sh`](providers.sh), separate from the manager logic. Each record contains an ID, a regular expression matched against `/etc/os-release` `ID` (or `windows`), execution type, and script URL.
-
-The default mappings are:
-
-| Platform match | Provider | Entry point |
+| Platform | Provider | Script |
 | --- | --- | --- |
-| Windows | `windows` | `ansible-windows-bootstrap` `bootstrap.ps1` |
-| Kali Linux (including Kali Purple, whose OS ID is Kali) | `kali` | `ansible-kali-bootstrap` `bootstrap-ansible-user.sh` |
-| Other Linux IDs | `linux` | `ansible-linux-bootstrap` `bootstrap-ansible-user.sh` |
+| Windows | `windows` | [ansible-windows-bootstrap](https://github.com/Michdo93/ansible-windows-bootstrap) `bootstrap.ps1` |
+| Kali Linux / Kali Purple | `kali` | [ansible-kali-bootstrap](https://github.com/Michdo93/ansible-kali-bootstrap) `bootstrap-ansible-user.sh` |
+| Other Linux (Debian family) | `linux` | [ansible-linux-bootstrap](https://github.com/Michdo93/ansible-linux-bootstrap) `bootstrap-ansible-user.sh` |
 
-### Add another bootstrap script
+Record format in `providers.sh`: `id|OS_ID_regex|execution_type|URL` (first match wins, regex is anchored; use `[]`/`()` for alternatives, not `|`).
 
-The manager code does not need to change for a provider that uses one of the two supported interfaces. Add a record to the `BOOTSTRAP_PROVIDERS` array in `providers.sh` using this format:
+Interfaces expected from providers:
 
-```text
-'provider-id|OS_ID_regex|execution_type|bootstrap_URL'
-```
-
-For example, to use a separate script for Fedora before the general Linux fallback:
-
-```bash
-  'fedora|fedora|shell|https://raw.githubusercontent.com/your-org/fedora-bootstrap/main/bootstrap.sh'
-```
-
-Place specific matches before broad matches such as `.*`; the manager selects the first matching record. The regular expression is matched against the `ID` value from Linux `/etc/os-release`. Windows uses the ID `windows`.
-
-Use `shell` for a POSIX/Bash bootstrap that accepts the same argument interface as the current Linux providers:
-
-```bash
-curl -fsSL "$url" | sudo bash -s -- username="$username" password="$password"
-```
-
-Use `powershell` for a Windows script that accepts `-Username` and `-Password`. The target's OpenSSH default shell must be PowerShell. The URL should point directly to the script entry point.
-
-If a new bootstrap needs different parameters, elevation behavior, package installation, or a different shell, update `bootstrap-manager.sh` to add a new execution type and implement its invocation. Also update this README with its prerequisites and security implications. Before adding a provider, confirm its OS detection ID and interface, check the script source, and try it on a disposable test host.
+- `shell`: Bash script, run as root: `bootstrap.sh username=<name> ssh_public_key='<key>' sudo_mode=vault|nopasswd password_stdin=1` (password on the first stdin line).
+- `powershell`: script with `-Username`, `-Password`, `-PublicKey`, run elevated.
 
 ## Requirements
 
-- Bash 4 or newer, OpenSSH client, `timeout`, and `sed`.
-- Linux or WSL as the machine running this manager. SSH targets must listen on TCP port 22.
-- Linux targets need a POSIX shell and an account that can use `sudo` (or root).
-- Windows targets need OpenSSH Server configured with PowerShell as its default shell. The SSH account must have the rights required by the Windows bootstrap.
-- Internet access from targets to `raw.githubusercontent.com`.
-- Package manager and administrator access on Linux if `curl` must be installed.
+Control node: Bash 4+, OpenSSH client (`ssh`, `scp`, `ssh-keygen`), coreutils, and `sshpass` or OpenSSH ≥ 8.4. Targets: SSH reachable; Linux needs `bash`, `base64` and root or sudo; Windows needs OpenSSH Server with SFTP (default).
 
-The script checks whether `curl` exists on Linux and attempts installation with `apt-get`, `dnf`, `yum`, `pacman`, or `zypper` before running a shell provider. The provider command uses `sudo bash`, matching the upstream interface supplied for these repositories.
+## Usage
 
-## Run
+Interactive (scan a range, bootstrap each host):
 
 ```bash
 chmod +x bootstrap-manager.sh
 ./bootstrap-manager.sh
 ```
 
-Enter and confirm the IPv4 range. For each SSH-reachable device, choose whether to continue, provide the SSH username, then enter and confirm the new Ansible account username and password. Password input is hidden. The manager detects the platform, chooses the matching provider, asks for confirmation, and reports success or failure before continuing to the next host.
+Single host:
 
-Yes accepts `y`, `Y`, `yes`, or `Yes`; No accepts `n`, `N`, `no`, or `No`. Enter chooses the displayed default. SSH authentication is attempted up to three times per device.
+```bash
+./bootstrap-manager.sh --host 192.168.0.20 --admin-user pi --user ansible
+./bootstrap-manager.sh --host 192.168.0.30 --port 2222 --admin-user root --user sysadmin --sudo-mode nopasswd
+```
 
-## Security considerations
+Non-interactive: set `BOOTSTRAP_ADMIN_PASSWORD` (empty = key/agent) and `BOOTSTRAP_ACCOUNT_PASSWORD`.
 
-This tool downloads and executes remote scripts. Review the provider code and pin a reviewed commit or release before using it on important systems; the default URLs track the `main` branch. Host key verification is enabled, and the first connection may prompt you to verify a fingerprint.
+`--sudo-mode vault` (default) writes `<user> ALL=(ALL:ALL) ALL` - Ansible then needs the account password, kept in Ansible Vault by the inventory generator. `--sudo-mode nopasswd` writes `<user> ALL=(ALL:ALL) NOPASSWD: ALL`.
 
-The upstream bootstrap interfaces take the new account password as a command-line argument. That can expose it briefly to privileged process inspection on the remote host. The manager hides password input and does not write credentials to local files, but cannot eliminate that exposure without changing the provider interfaces. Use a unique temporary password and rotate it if the provider or target is not fully trusted.
+## Library
 
-Linux bootstrap currently uses `sudo bash`, so the SSH account must have working sudo access (or the provider command must be customized for a root SSH account). The Windows invocation depends on the SSH server's PowerShell shell configuration. Bootstrap output may include system details and is shown on failures for diagnosis.
+`lib/bootstrap-lib.sh` contains all logic (`bm_ensure_keypair`, `bm_scan`, `bm_bootstrap_host`, `bm_gather_facts`, `bm_verify_become`, ...) and is sourced by the inventory generator.
 
-## Limitations
+## Security
 
-- IPv4 only; maximum range size is 65,536 addresses.
-- SSH TCP port 22 only.
-- OS identification expects `/etc/os-release` and `uname` for Linux, or a PowerShell-based Windows OpenSSH server.
-- The generic `linux` provider is currently the fallback for any non-Kali Linux ID. Review or add provider records if a distribution needs a different script.
+- Review the provider scripts; prefer local reviewed checkouts or pin URLs to a commit.
+- A changed host key is a warning sign; only accept it if you know the host was reinstalled.
+- Generated private keys have no passphrase so that Ansible can run unattended; protect `~/.ssh` on the control node.
